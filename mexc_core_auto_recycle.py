@@ -1114,8 +1114,7 @@ def check_trade_conditions_from_main(symbol):
             and closelow <= ema21_now       # أدنى سعر للشمعة المغلقة لامس/تجاوز EMA21
             and lastclose > ema21_now       # إغلاق الشمعة الحالية أعلى من إغلاق الشمعة المغلقة
             and rsi_ok                      # RSI في المدى المناسب للزخم
-            and vwap_ok                     # السعر فوق متوسط VWAP
-            and psar_ok                     # نقاط SAR أسفل السعر الحالي
+           
         ):
             return True, lastclose, "Signal conditions confirmed"
 
