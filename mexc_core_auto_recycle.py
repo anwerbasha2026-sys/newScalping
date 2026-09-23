@@ -15,7 +15,6 @@ DB_NAME = "trading_bot.db"
 # --- Shared API state ---
 _api_rate_lock = threading.Lock()
 _api_last_request = 0.0
-# Keep the original pacing target; all requests pass through the same limiter.
 API_MIN_INTERVAL = 0.15
 
 _server_time_offset_ms = 0
@@ -144,13 +143,11 @@ def get_setting(key, default=""):
 
 
 def save_api_credentials(api_key, secret_key):
-    """Persist MEXC API credentials in the local SQLite settings database."""
     save_setting("mexc_api_key", api_key.strip())
     save_setting("mexc_secret_key", secret_key.strip())
 
 
 def get_api_credentials():
-    """Return saved MEXC API credentials from the local SQLite database."""
     return (
         get_setting("mexc_api_key", ""),
         get_setting("mexc_secret_key", ""),
@@ -563,7 +560,6 @@ def normalize_order_quantity(symbol, quantity, price=None):
 # Market data
 # =========================
 def get_top_200_symbols():
-    """Fetch top 200 supported USDT Spot pairs sorted by 24h quote volume."""
     try:
         supported = get_supported_spot_symbols()
         response = _request_json("GET", f"{BASE_URL}/ticker/24hr", timeout=8)
@@ -585,7 +581,6 @@ def get_top_200_symbols():
                     continue
                 status = str(item.get("status", "")).upper()
                 if status and status not in {"1", "TRADING", "ENABLED", "ONLINE"}:
-                    # Tickers normally omit status; only reject explicit disabled-looking values.
                     if status in {"0", "DISABLED", "OFFLINE", "CLOSED", "HALT", "BREAK"}:
                         continue
                 try:
@@ -630,7 +625,6 @@ def get_account_balances(api_key, secret_key):
     try:
         response = _signed_request("GET", "/account", api_key, secret_key, timeout=6, retries_on_network=True)
         if response is None or response.status_code != 200:
-            # If time is rejected, retry once after a forced sync.
             if response is not None and _is_timestamp_error(response):
                 response = _signed_request(
                     "GET", "/account", api_key, secret_key,
@@ -678,15 +672,9 @@ def query_mexc_order(symbol, order_id, api_key, secret_key):
 
 
 def _average_fill_price(order_data):
-    """Return the ACTUAL average execution price only.
-
-    Important: for MARKET orders, the API `price` field is not treated as an
-    execution price fallback. We only trust avgPrice/filled quantities/fills.
-    """
     if not isinstance(order_data, dict):
         return None
 
-    # Prefer explicit average execution fields.
     for key in ("avgPrice", "averagePrice", "dealAvgPrice"):
         value = order_data.get(key)
         try:
@@ -695,7 +683,6 @@ def _average_fill_price(order_data):
         except (TypeError, ValueError):
             pass
 
-    # Calculate from actual executed base quantity and actual quote spent.
     executed_qty = order_data.get("executedQty") or order_data.get("executedQuantity")
     quote_qty = (
         order_data.get("cummulativeQuoteQty")
@@ -748,7 +735,6 @@ def _executed_quantity(order_data):
 
 
 def _wait_for_order_result(symbol, order_id, api_key, secret_key, timeout_seconds=4.0):
-    """Poll the order until MEXC reports a terminal state or a real fill."""
     deadline = time.monotonic() + timeout_seconds
     last = None
     while time.monotonic() < deadline:
@@ -756,7 +742,6 @@ def _wait_for_order_result(symbol, order_id, api_key, secret_key, timeout_second
         if isinstance(last, dict):
             status = _order_status(last)
             executed = _executed_quantity(last)
-            # Any real execution is enough to establish that the order traded.
             if executed > 0:
                 return last
             if status in {"CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}:
@@ -794,8 +779,6 @@ def place_mexc_buy_order(symbol, amount_usd, api_key, secret_key):
             "quoteOrderQty": _decimal_to_string(amount),
         }
 
-        # Do not automatically retry a POST after a network failure: the exchange may
-        # have accepted the order even when the client did not receive the response.
         response = _signed_request(
             "POST", "/order", api_key, secret_key,
             params=params, timeout=8, retries_on_network=False
@@ -904,7 +887,6 @@ def place_mexc_sell_order_market(symbol, api_key, secret_key):
 
 # =========================
 # Strategy / indicators
-# IMPORTANT: strategy conditions intentionally preserved.
 # =========================
 def _get_klines(symbol, interval, limit=500):
     response = _request_json(
@@ -935,6 +917,111 @@ def calculate_ema_series(data, period):
     return ema
 
 
+# --- المؤشرات المضافة حديثاً بأكواد بايثون القياسية ---
+
+def calculate_rsi_series(closes, period=14):
+    """حساب مؤشر القوة النسبية RSI"""
+    if len(closes) < period + 1:
+        return []
+    
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(abs(diff))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    rsi_series = []
+    if avg_loss == 0:
+        rsi_series.append(100.0)
+    else:
+        rs = avg_gain / avg_loss
+        rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            rsi_series.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
+
+    return rsi_series
+
+
+def calculate_vwap_latest(klines):
+    """حساب مؤشر متوسط السعر المرجح بالحجم VWAP للشمعة الأخيرة"""
+    try:
+        total_pv = 0.0
+        total_vol = 0.0
+        for k in klines:
+            high = float(k[2])
+            low = float(k[3])
+            close = float(k[4])
+            vol = float(k[5])
+            typical_price = (high + low + close) / 3.0
+            total_pv += typical_price * vol
+            total_vol += vol
+        if total_vol > 0:
+            return total_pv / total_vol
+    except Exception:
+        pass
+    return None
+
+
+def calculate_psar_latest(klines, step=0.02, max_step=0.2):
+    """حساب مؤشر البارابوليك سار Parabolic SAR للشمعة الأخيرة"""
+    if len(klines) < 5:
+        return None
+    try:
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+
+        is_long = True
+        sar = lows[0]
+        ep = highs[0]
+        af = step
+
+        for i in range(1, len(klines)):
+            prev_sar = sar
+            if is_long:
+                sar = prev_sar + af * (ep - prev_sar)
+                sar = min(sar, lows[i - 1], lows[max(0, i - 2)])
+                if lows[i] < sar:
+                    is_long = False
+                    sar = ep
+                    ep = lows[i]
+                    af = step
+                else:
+                    if highs[i] > ep:
+                        ep = highs[i]
+                        af = min(af + step, max_step)
+            else:
+                sar = prev_sar + af * (ep - prev_sar)
+                sar = max(sar, highs[i - 1], highs[max(0, i - 2)])
+                if highs[i] > sar:
+                    is_long = True
+                    sar = ep
+                    ep = highs[i]
+                    af = step
+                else:
+                    if lows[i] < ep:
+                        ep = lows[i]
+                        af = min(af + step, max_step)
+        return sar
+    except Exception:
+        return None
+
+
 def check_ema200_trend(formatted_symbol, interval):
     try:
         klines = _get_klines(formatted_symbol, interval, 500)
@@ -952,6 +1039,8 @@ def _ema_value_at_candle(ema_series, period, candle_index):
     if 0 <= ema_index < len(ema_series):
         return ema_series[ema_index]
     return None
+
+
 def check_trade_conditions_from_main(symbol):
     try:
         formatted_symbol = symbol.replace("/", "").upper()
@@ -1004,14 +1093,29 @@ def check_trade_conditions_from_main(symbol):
         if None in (ema9_now, ema21_now, ema200_now):
             return False, last_closed_price, "EMA data unavailable"
 
-        # الشرط المصحح:
+        # --- حساب المؤشرات التوكيدية الجديدة ---
+        rsi_series = calculate_rsi_series(closes, 14)
+        rsi_now = rsi_series[-1] if rsi_series else None
+
+        vwap_now = calculate_vwap_latest(closed_klines)
+        psar_now = calculate_psar_latest(closed_klines)
+
+        # التحقق من شروط المؤشرات الجديدة
+        rsi_ok = rsi_now is not None and (45 < rsi_now < 68)
+        vwap_ok = vwap_now is not None and (lastclose > vwap_now)
+        psar_ok = psar_now is not None and (psar_now < lastclose)
+
+        # الشرط المصحح المكتمل مع المؤشرات التوكيدية:
         if (
             ema9_now > ema21_now
             and ema21_now > ema200_now
             and lastclose > lastopen        # الشمعة الحالية خضراء
             and closeclose > closeopen      # الشمعة المغلقة خضراء
             and closelow <= ema21_now       # أدنى سعر للشمعة المغلقة لامس/تجاوز EMA21
-            and lastclose > ema21_now      # إغلاق الشمعة الحالية أعلى من إغلاق الشمعة المغلقة
+            and lastclose > ema21_now       # إغلاق الشمعة الحالية أعلى من إغلاق الشمعة المغلقة
+            and rsi_ok                      # RSI في المدى المناسب للزخم
+            and vwap_ok                     # السعر فوق متوسط VWAP
+            and psar_ok                     # نقاط SAR أسفل السعر الحالي
         ):
             return True, lastclose, "Signal conditions confirmed"
 
