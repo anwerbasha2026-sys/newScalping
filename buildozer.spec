@@ -1,8 +1,8 @@
 [app]
 
-title = MEXC Mobile Scalper
-package.name = mexcmobilescalper
-package.domain = com.mexcscalper
+title =NEW MEXC Mobile Scalper
+package.name = newmexcmobilescalper
+package.domain = com.newmexcscalper
 
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,json,txt,ttf
