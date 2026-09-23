@@ -18,7 +18,7 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.popup import Popup
 
-from mexc_core import (
+from mexc_core_auto_recycle import (
     get_top_200_symbols,
     check_trade_conditions_from_main,
     place_mexc_buy_order,
