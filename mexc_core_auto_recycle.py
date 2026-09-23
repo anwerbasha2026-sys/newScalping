@@ -906,6 +906,52 @@ def place_mexc_sell_order_market(symbol, api_key, secret_key):
 # Strategy / indicators
 # IMPORTANT: strategy conditions intentionally preserved.
 # =========================
+def _get_klines(symbol, interval, limit=500):
+    response = _request_json(
+        "GET",
+        f"{BASE_URL}/klines",
+        params={
+            "symbol": symbol.replace("/", "").upper(),
+            "interval": interval,
+            "limit": limit,
+        },
+        timeout=5,
+    )
+    if response is None or response.status_code != 200:
+        return None
+    payload = _safe_json(response)
+    return payload if isinstance(payload, list) else None
+
+
+def calculate_ema_series(data, period):
+    if len(data) < period:
+        return []
+    ema = []
+    multiplier = 2 / (period + 1)
+    sma = sum(data[:period]) / period
+    ema.append(sma)
+    for price in data[period:]:
+        ema.append((price - ema[-1]) * multiplier + ema[-1])
+    return ema
+
+
+def check_ema200_trend(formatted_symbol, interval):
+    try:
+        klines = _get_klines(formatted_symbol, interval, 500)
+        if not klines or len(klines) < 201:
+            return False
+        closes = [float(k[4]) for k in klines[:-1]]
+        ema200 = calculate_ema_series(closes, 200)
+        return bool(ema200 and closes[-1] > ema200[-1])
+    except Exception:
+        return False
+
+
+def _ema_value_at_candle(ema_series, period, candle_index):
+    ema_index = candle_index - (period - 1)
+    if 0 <= ema_index < len(ema_series):
+        return ema_series[ema_index]
+    return None
 def check_trade_conditions_from_main(symbol):
     try:
         formatted_symbol = symbol.replace("/", "").upper()
