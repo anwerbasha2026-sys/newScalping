@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build MEXC Mobile Scalper - ONN 100071481A
+    name: NEW Build MEXC Mobile Scalper - ONN 100071481A
     runs-on: ubuntu-22.04
 
     steps:
