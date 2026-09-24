@@ -917,8 +917,6 @@ def calculate_ema_series(data, period):
     return ema
 
 
-# --- المؤشرات المضافة حديثاً بأكواد بايثون القياسية ---
-
 def calculate_rsi_series(closes, period=14):
     """حساب مؤشر القوة النسبية RSI"""
     if len(closes) < period + 1:
@@ -1022,6 +1020,30 @@ def calculate_psar_latest(klines, step=0.02, max_step=0.2):
         return None
 
 
+def calculate_macd_series(closes, fast_period=12, slow_period=26, signal_period=9):
+    """حساب مؤشر MACD (Line, Signal Line, Histogram)"""
+    if len(closes) < slow_period + signal_period:
+        return [], [], []
+
+    ema_fast = calculate_ema_series(closes, fast_period)
+    ema_slow = calculate_ema_series(closes, slow_period)
+
+    # توحيد أطوال السلاسل الزمنية للـ MACD Line
+    diff_len = len(ema_fast) - len(ema_slow)
+    ema_fast_trimmed = ema_fast[diff_len:]
+
+    macd_line = [f - s for f, s in zip(ema_fast_trimmed, ema_slow)]
+    signal_line = calculate_ema_series(macd_line, signal_period)
+
+    # توحيد الأطوال للـ Histogram
+    diff_sig = len(macd_line) - len(signal_line)
+    macd_line_trimmed = macd_line[diff_sig:]
+
+    histogram = [m - s for m, s in zip(macd_line_trimmed, signal_line)]
+
+    return macd_line_trimmed, signal_line, histogram
+
+
 def check_ema200_trend(formatted_symbol, interval):
     try:
         klines = _get_klines(formatted_symbol, interval, 500)
@@ -1061,18 +1083,16 @@ def check_trade_conditions_from_main(symbol):
 
         closed_klines = klines[:-1]
 
-        # -------------------------------------------------------------
-        # 1. الشمعة الحالية (غير المغلقة بعد)
+        # 1. الشمعة الحالية
         last_kline = klines[-1]
         lastopen  = float(last_kline[1])
         lastclose = float(last_kline[4])
 
-        # 2. الشمعة السابقة (آخر شمعة مغلقة)
+        # 2. الشمعة السابقة
         close_kline = klines[-2]
         closeopen  = float(close_kline[1])
         closelow   = float(close_kline[3])
         closeclose = float(close_kline[4])
-        # -------------------------------------------------------------
 
         closes  = [float(k[4]) for k in closed_klines]
         volumes = [float(k[5]) for k in closed_klines]
@@ -1093,19 +1113,32 @@ def check_trade_conditions_from_main(symbol):
         if None in (ema9_now, ema21_now, ema200_now):
             return False, last_closed_price, "EMA data unavailable"
 
-        # --- حساب المؤشرات التوكيدية الجديدة ---
+        # --- المؤشرات التوكيدية (RSI, VWAP, PSAR) ---
         rsi_series = calculate_rsi_series(closes, 14)
         rsi_now = rsi_series[-1] if rsi_series else None
 
         vwap_now = calculate_vwap_latest(closed_klines)
         psar_now = calculate_psar_latest(closed_klines)
 
-        # التحقق من شروط المؤشرات الجديدة
-        rsi_ok = rsi_now is not None and (45 < rsi_now < 68)
+        # --- حساب مؤشر MACD ---
+        macd_line, signal_line, histogram = calculate_macd_series(closes)
+        macd_now = macd_line[-1] if macd_line else None
+        signal_now = signal_line[-1] if signal_line else None
+        hist_now = histogram[-1] if histogram else None
+
+        # التحقق من شروط المؤشرات
+        rsi_ok  = rsi_now is not None and (45 < rsi_now < 68)
         vwap_ok = vwap_now is not None and (lastclose > vwap_now)
         psar_ok = psar_now is not None and (psar_now < lastclose)
+        macd_ok = (
+            macd_now is not None 
+            and signal_now is not None 
+            and hist_now is not None 
+            and (macd_now > signal_now) # تقاطع صعودي للـ MACD
+            and (hist_now > 0)           # الأعمدة الملونة موجبة
+        )
 
-        # الشرط المصحح المكتمل مع المؤشرات التوكيدية:
+        # الشرط المصحح المكتمل مع المؤشرات التوكيدية بما فيها MACD
         if (
             ema9_now > ema21_now
             and ema21_now > ema200_now
@@ -1114,7 +1147,9 @@ def check_trade_conditions_from_main(symbol):
             and closelow <= ema21_now       # أدنى سعر للشمعة المغلقة لامس/تجاوز EMA21
             and lastclose > ema21_now       # إغلاق الشمعة الحالية أعلى من إغلاق الشمعة المغلقة
             and rsi_ok                      # RSI في المدى المناسب للزخم
-           
+                          
+            and psar_ok                     # نقاط SAR أسفل السعر الحالي
+            and macd_ok                     # مؤشر MACD صعودي
         ):
             return True, lastclose, "Signal conditions confirmed"
 
