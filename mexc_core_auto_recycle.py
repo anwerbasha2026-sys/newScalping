@@ -1127,7 +1127,7 @@ def check_trade_conditions_from_main(symbol):
         hist_now = histogram[-1] if histogram else None
 
         # التحقق من شروط المؤشرات
-        rsi_ok  = rsi_now is not None and (45 < rsi_now < 68)
+        rsi_ok  = rsi_now is not None and (30 < rsi_now < 60)
         vwap_ok = vwap_now is not None and (lastclose > vwap_now)
         psar_ok = psar_now is not None and (psar_now < lastclose)
         macd_ok = (
